@@ -1,7 +1,7 @@
 from mindsdb_sql_parser import parse_sql
 from mindsdb.integrations.libs.api_handler import APIHandler
 from mindsdb.utilities import log
-from mindsdb.integrations.handlers.google_analytics_handler.google_analytics_tables import ConversionEventsTable
+from mindsdb.integrations.handlers.google_analytics_handler.google_analytics_tables import ConversionEventsTable, ReportTable
 from mindsdb.integrations.libs.response import (
     HandlerStatusResponse as StatusResponse,
     HandlerResponse as Response,
@@ -11,6 +11,7 @@ import json
 import os
 
 from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials as OAuth2Credentials
 from google.auth.transport.requests import Request
@@ -46,10 +47,13 @@ class GoogleAnalyticsHandler(APIHandler):
 
         self.scopes = self.connection_args.get('scopes', DEFAULT_SCOPES)
         self.service = None
+        self.data_service = None
         self.is_connected = False
         conversion_events = ConversionEventsTable(self)
         self.conversion_events = conversion_events
         self._register_table('conversion_events', conversion_events)
+        report = ReportTable(self)
+        self._register_table('report', report)
 
     def _get_creds_json(self):
         if 'credentials_file' in self.connection_args:
@@ -103,6 +107,28 @@ class GoogleAnalyticsHandler(APIHandler):
 
         return AnalyticsAdminServiceClient(credentials=creds)
 
+    def _build_creds(self):
+        if 'access_token' in self.connection_args:
+            token = self.connection_args.get('access_token')
+            refresh_token = self.connection_args.get('refresh_token')
+            client_id = self.connection_args.get('client_id')
+            client_secret = self.connection_args.get('client_secret')
+            token_uri = self.connection_args.get('token_uri')
+            creds = OAuth2Credentials(
+                token,
+                refresh_token=refresh_token,
+                token_uri=token_uri or "https://oauth2.googleapis.com/token",
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=self.scopes,
+            )
+            if not creds.valid and creds.expired and getattr(creds, 'refresh_token', None):
+                creds.refresh(Request())
+            return creds
+
+        info = self._get_creds_json()
+        return service_account.Credentials.from_service_account_info(info=info, scopes=self.scopes)
+
     def connect(self):
         """
         Authenticate with the Google Analytics Admin API using the credential file.
@@ -119,6 +145,12 @@ class GoogleAnalyticsHandler(APIHandler):
         self.is_connected = True
 
         return self.service
+
+    def connect_data_api(self):
+        if self.data_service is not None:
+            return self.data_service
+        self.data_service = BetaAnalyticsDataClient(credentials=self._build_creds())
+        return self.data_service
 
     def check_connection(self) -> StatusResponse:
         """

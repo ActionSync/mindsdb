@@ -3,6 +3,7 @@ from typing import List
 
 from google.analytics.admin_v1beta import ListConversionEventsRequest, ConversionEvent, CreateConversionEventRequest, \
     UpdateConversionEventRequest, DeleteConversionEventRequest
+from google.analytics.data_v1beta.types import RunReportRequest, Dimension, Metric, DateRange
 from mindsdb_sql_parser import Constant
 from mindsdb_sql_parser import ast
 from mindsdb.integrations.libs.api_handler import APITable
@@ -283,4 +284,73 @@ class ConversionEventsTable(APITable):
             'deletable',
             'custom',
             'countingMethod',
+        ]
+
+
+class ReportTable(APITable):
+
+    def select(self, query: ast.Select) -> pd.DataFrame:
+        """
+        Runs a report against the GA4 Data API.
+
+        Supported WHERE conditions: start_date, end_date
+        Defaults: last 30 days, dimensions=[date], metrics=[sessions, activeUsers, screenPageViews]
+
+        Args:
+            query (ast.Select): SQL query to parse.
+
+        Returns:
+            pd.DataFrame
+        """
+        conditions = extract_comparison_conditions(query.where)
+        params = {
+            'start_date': '30daysAgo',
+            'end_date': 'today',
+        }
+        for op, arg1, arg2 in conditions:
+            if arg1 in ('start_date', 'end_date'):
+                params[arg1] = arg2
+            else:
+                raise NotImplementedError
+
+        if query.order_by is not None:
+            pass
+
+        if query.limit is not None:
+            pass
+
+        service = self.handler.connect_data_api()
+        request = RunReportRequest(
+            property=f"properties/{self.handler.property_id}",
+            date_ranges=[DateRange(start_date=params['start_date'], end_date=params['end_date'])],
+            dimensions=[Dimension(name=d) for d in ['date', 'pagePath', 'sessionSource']],
+            metrics=[Metric(name=m) for m in ['sessions', 'activeUsers', 'screenPageViews', 'bounceRate', 'averageSessionDuration']],
+        )
+        response = service.run_report(request)
+
+        rows = []
+        for row in response.rows:
+            rows.append(
+                [d.value for d in row.dimension_values] +
+                [m.value for m in row.metric_values]
+            )
+
+        return pd.DataFrame(rows, columns=self.get_columns())
+
+    def get_columns(self) -> List[str]:
+        """
+        Gets all columns to be returned in pandas DataFrame responses
+
+        Returns:
+        List[str]: List of columns
+        """
+        return [
+            'date',
+            'pagePath',
+            'sessionSource',
+            'sessions',
+            'activeUsers',
+            'screenPageViews',
+            'bounceRate',
+            'averageSessionDuration',
         ]
