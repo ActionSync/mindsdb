@@ -72,57 +72,35 @@ class GoogleAnalyticsHandler(APIHandler):
             raise Exception('Connection args have to content ether credentials_file or credentials_json')
 
     def create_connection(self):
-        if 'access_token' in self.connection_args:
-            token = self.connection_args.get('access_token')
-            if not token or not isinstance(token, str):
-                raise Exception("access_token must be a non-empty string")
-
-            creds = OAuth2Credentials(token, scopes=self.scopes)
-            refresh_token = self.connection_args.get('refresh_token')
-            client_id = self.connection_args.get('client_id')
-            client_secret = self.connection_args.get('client_secret')
-            token_uri = self.connection_args.get('token_uri')
-            if refresh_token or client_id or client_secret or token_uri:
-                creds = OAuth2Credentials(
-                    token,
-                    refresh_token=refresh_token,
-                    token_uri=token_uri or "https://oauth2.googleapis.com/token",
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    scopes=self.scopes,
-                )
-
-            if not creds or not creds.valid:
-                if creds and creds.expired and getattr(creds, 'refresh_token', None):
-                    creds.refresh(Request())
-
-            return AnalyticsAdminServiceClient(credentials=creds)
-
-        info = self._get_creds_json()
-        creds = service_account.Credentials.from_service_account_info(info=info, scopes=self.scopes)
-
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-
+        creds = self._build_creds()
         return AnalyticsAdminServiceClient(credentials=creds)
 
     def _build_creds(self):
         if 'access_token' in self.connection_args:
             token = self.connection_args.get('access_token')
-            refresh_token = self.connection_args.get('refresh_token')
+            if not token or not isinstance(token, str):
+                raise Exception("access_token must be a non-empty string")
+            creds = OAuth2Credentials(token, scopes=self.scopes)
+            if not creds.valid and creds.expired and getattr(creds, 'refresh_token', None):
+                creds.refresh(Request())
+            return creds
+
+        if 'client_id' in self.connection_args:
             client_id = self.connection_args.get('client_id')
             client_secret = self.connection_args.get('client_secret')
+            refresh_token = self.connection_args.get('refresh_token')
             token_uri = self.connection_args.get('token_uri')
+            if not (client_id and client_secret and refresh_token):
+                raise Exception("client_id, client_secret, and refresh_token are all required together")
             creds = OAuth2Credentials(
-                token,
-                refresh_token=refresh_token,
-                token_uri=token_uri or "https://oauth2.googleapis.com/token",
+                token=None,
                 client_id=client_id,
                 client_secret=client_secret,
+                refresh_token=refresh_token,
+                token_uri=token_uri or "https://oauth2.googleapis.com/token",
                 scopes=self.scopes,
             )
-            if not creds.valid and creds.expired and getattr(creds, 'refresh_token', None):
+            if not creds.valid:
                 creds.refresh(Request())
             return creds
 

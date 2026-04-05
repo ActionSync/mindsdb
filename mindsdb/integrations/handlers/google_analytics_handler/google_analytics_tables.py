@@ -9,6 +9,125 @@ from mindsdb_sql_parser import ast
 from mindsdb.integrations.libs.api_handler import APITable
 from mindsdb.integrations.utilities.sql_utils import extract_comparison_conditions
 
+# All standard dimensions from GA4 Data API Core Reporting schema
+# https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
+ALL_DIMENSIONS = [
+    # Time
+    'date', 'dateHour', 'dateHourMinute', 'dayOfWeek', 'day', 'week', 'month', 'year',
+    'hour', 'minute', 'nthDay', 'nthHour', 'nthMinute', 'nthMonth', 'nthWeek', 'nthYear',
+    # Geography
+    'country', 'countryId', 'continent', 'continentId', 'subContinent', 'region',
+    'city', 'cityId', 'latitude', 'longitude', 'metro',
+    # Page / Content
+    'pagePath', 'pageTitle', 'pageReferrer', 'pagePathPlusQueryString',
+    'fullPageUrl', 'landingPage', 'landingPagePlusQueryString',
+    'contentGroup', 'contentId', 'contentType',
+    # Traffic Source
+    'sessionSource', 'sessionMedium', 'sessionCampaignName', 'sessionCampaignId',
+    'sessionDefaultChannelGroup', 'sessionGoogleAdsAccountName', 'sessionGoogleAdsCampaignId',
+    'sessionGoogleAdsCampaignName', 'sessionGoogleAdsCampaignType', 'sessionGoogleAdsAdGroupId',
+    'sessionGoogleAdsAdGroupName', 'sessionGoogleAdsKeyword', 'sessionGoogleAdsMatchType',
+    'sessionGoogleAdsNetworkType', 'sessionGoogleAdsQuery',
+    'sessionManualAdContent', 'sessionManualTerm', 'sessionSa360AdGroupName',
+    'sessionSa360CampaignId', 'sessionSa360CampaignName', 'sessionSa360CreativeFormat',
+    'sessionSa360EngineAccountId', 'sessionSa360EngineAccountName', 'sessionSa360EngineAccountType',
+    'sessionSa360Keyword', 'sessionSa360Medium', 'sessionSa360Query', 'sessionSa360Source',
+    'sessionSourceMedium', 'sessionSourcePlatform',
+    'firstUserSource', 'firstUserMedium', 'firstUserCampaignName', 'firstUserCampaignId',
+    'firstUserDefaultChannelGroup', 'firstUserGoogleAdsCampaignName',
+    'firstUserGoogleAdsCampaignType', 'firstUserSourceMedium', 'firstUserSourcePlatform',
+    'firstUserManualAdContent', 'firstUserManualTerm',
+    'source', 'medium', 'campaignName', 'campaignId', 'defaultChannelGroup',
+    'sourceMedium', 'sourcePlatform',
+    # Device
+    'deviceCategory', 'mobileDeviceBranding', 'mobileDeviceModel', 'mobileDeviceMarketingName',
+    'mobileInputSelector', 'mobileDeviceInfo', 'operatingSystem', 'operatingSystemVersion',
+    'operatingSystemWithVersion', 'browser', 'browserVersion', 'screenResolution',
+    'language', 'languageCode',
+    # User
+    'newVsReturning', 'userAgeBracket', 'userGender',
+    'signedInWithUserId', 'isConversionEvent',
+    # App / Platform
+    'platform', 'platformDeviceCategory', 'appVersion', 'appInstallerId',
+    'appStore', 'appName', 'streamId', 'streamName',
+    # Event
+    'eventName', 'customEvent:parameter_name',
+    # Search Console
+    'googleAdsAccountName', 'googleAdsCampaignId', 'googleAdsCampaignName',
+    'googleAdsCampaignType', 'googleAdsAdGroupId', 'googleAdsAdGroupName',
+    'googleAdsKeyword', 'googleAdsQuery',
+    # Organic Search
+    'searchTerm', 'organicGoogleSearchQuery', 'organicGoogleSearchCategory',
+    'organicGoogleSearchViewportSize',
+    # Ecommerce
+    'itemId', 'itemName', 'itemBrand', 'itemCategory', 'itemCategory2', 'itemCategory3',
+    'itemCategory4', 'itemCategory5', 'itemListId', 'itemListName', 'itemListPosition',
+    'itemLocationId', 'itemPromotionId', 'itemPromotionName', 'itemPromotionCreativeName',
+    'orderCoupon', 'transactionId', 'shippingTier', 'paymentType',
+    'adFormat', 'adSourceName', 'adUnitName',
+    # Audience / Cohort
+    'audienceId', 'audienceName', 'cohort', 'cohortNthDay', 'cohortNthWeek', 'cohortNthMonth',
+    # Other
+    'achievementId', 'character', 'brandingInterest', 'level', 'virtual_currency_name',
+    'groupId', 'fileExtension', 'fileName', 'linkClasses', 'linkDomain',
+    'linkId', 'linkText', 'linkUrl', 'method', 'outbound', 'percentScrolled',
+    'searchTerm', 'videoProvider', 'videoTitle', 'videoUrl', 'visible',
+    'testDataFilterName', 'unifiedPagePathScreen', 'unifiedPageScreen',
+    'unifiedScreenClass', 'unifiedScreenName',
+]
+
+# All standard metrics from GA4 Data API Core Reporting schema
+# https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
+ALL_METRICS = [
+    # Users
+    'activeUsers', 'newUsers', 'totalUsers', 'active1DayUsers', 'active7DayUsers',
+    'active28DayUsers', 'dauPerMau', 'dauPerWau', 'wauPerMau',
+    'firstTimePurchasers', 'firstTimePurchasersRate',
+    # Sessions
+    'sessions', 'sessionsPerUser', 'bounceRate', 'engagementRate',
+    'engagedSessions', 'averageSessionDuration', 'userEngagementDuration',
+    # Page / Screen
+    'screenPageViews', 'screenPageViewsPerSession', 'screenPageViewsPerUser',
+    # Events
+    'eventCount', 'eventCountPerUser', 'eventsPerSession',
+    # Conversions / Key Events
+    'conversions', 'sessionConversionRate', 'userConversionRate',
+    'keyEvents', 'keyEventRate',
+    # Engagement
+    'scrolledUsers',
+    # Revenue
+    'totalRevenue', 'purchaseRevenue', 'advertiserAdRevenue',
+    'publisherAdRevenue', 'subscriptionRevenue',
+    # Ecommerce
+    'ecommercePurchases', 'addToCarts', 'checkouts', 'cartToViewRate',
+    'purchaseToViewRate', 'itemViews', 'itemListViews', 'itemListClicks',
+    'itemListClickThroughRate', 'itemsAddedToCart', 'itemsCheckedOut',
+    'itemsPurchased', 'itemsViewed', 'itemRevenue', 'itemDiscountAmount',
+    'itemPromotionClicks', 'itemPromotionViews', 'itemPromotionClickThroughRate',
+    'refundAmount', 'shippingAmount', 'taxAmount', 'transactions',
+    'transactionsPerPurchaser', 'averagePurchaseRevenue', 'averagePurchaseRevenuePerPayingUser',
+    'averagePurchaseRevenuePerUser', 'averageRevenuePerUser',
+    # Advertising
+    'publisherAdClicks', 'publisherAdImpressions', 'adUnitExposure',
+    # Organic Search
+    'organicGoogleSearchClicks', 'organicGoogleSearchImpressions',
+    'organicGoogleSearchClickThroughRate', 'organicGoogleSearchAveragePosition',
+    # Video
+    'videoViews', 'videoCompletions',
+    # Crashes (App)
+    'crashAffectedUsers', 'crashFreeUsersRate',
+    # Other
+    'totalAdRevenue',
+]
+
+# Default fallback for SELECT * — most commonly asked metrics, capped at 10 each
+DEFAULT_DIMENSIONS = ['date', 'pagePath', 'sessionSource', 'country', 'deviceCategory']
+DEFAULT_METRICS = [
+    'sessions', 'activeUsers', 'newUsers', 'screenPageViews',
+    'bounceRate', 'averageSessionDuration', 'engagementRate', 'totalRevenue',
+    'conversions', 'eventCount',
+]
+
 
 class ConversionEventsTable(APITable):
 
@@ -293,8 +412,30 @@ class ReportTable(APITable):
         """
         Runs a report against the GA4 Data API.
 
-        Supported WHERE conditions: start_date, end_date
-        Defaults: last 30 days, dimensions=[date], metrics=[sessions, activeUsers, screenPageViews]
+        The agent should SELECT only the specific columns it needs. The API supports
+        a maximum of 10 dimensions and 10 metrics per request. Selecting specific
+        columns ensures the API call stays within this limit.
+
+        Available dimensions:
+            date, pagePath, sessionSource, sessionMedium, sessionCampaignName,
+            country, city, deviceCategory, operatingSystem, browser, language,
+            eventName, pageTitle
+
+        Available metrics:
+            sessions, activeUsers, newUsers, totalUsers, screenPageViews,
+            bounceRate, averageSessionDuration, engagementRate, engagedSessions,
+            eventCount, conversions, totalRevenue, ecommercePurchases,
+            addToCarts, checkouts, sessionConversionRate, userEngagementDuration,
+            scrolledUsers
+
+        Supported WHERE conditions:
+            - start_date: Accepts GA4 relative values ('NdaysAgo', 'yesterday', 'today')
+              or absolute dates in 'YYYY-MM-DD' format. Default: '30daysAgo'.
+            - end_date: Same format as start_date. Default: 'today'.
+
+        Example queries:
+            SELECT date, sessions, activeUsers FROM report WHERE start_date = '7daysAgo'
+            SELECT country, sessions, totalRevenue FROM report WHERE start_date = '2024-01-01' AND end_date = '2024-03-31'
 
         Args:
             query (ast.Select): SQL query to parse.
@@ -319,12 +460,35 @@ class ReportTable(APITable):
         if query.limit is not None:
             pass
 
+        # Determine which columns the agent selected
+        requested_columns = []
+        is_star = False
+        for target in query.targets:
+            if isinstance(target, ast.Star):
+                is_star = True
+                break
+            elif isinstance(target, ast.Identifier):
+                requested_columns.append(target.parts[-1])
+
+        if is_star:
+            selected_dimensions = DEFAULT_DIMENSIONS
+            selected_metrics = DEFAULT_METRICS
+        else:
+            selected_dimensions = [c for c in requested_columns if c in ALL_DIMENSIONS]
+            selected_metrics = [c for c in requested_columns if c in ALL_METRICS]
+
+            if not selected_dimensions:
+                selected_dimensions = ['date']
+
+            selected_dimensions = selected_dimensions[:10]
+            selected_metrics = selected_metrics[:10]
+
         service = self.handler.connect_data_api()
         request = RunReportRequest(
             property=f"properties/{self.handler.property_id}",
             date_ranges=[DateRange(start_date=params['start_date'], end_date=params['end_date'])],
-            dimensions=[Dimension(name=d) for d in ['date', 'pagePath', 'sessionSource']],
-            metrics=[Metric(name=m) for m in ['sessions', 'activeUsers', 'screenPageViews', 'bounceRate', 'averageSessionDuration']],
+            dimensions=[Dimension(name=d) for d in selected_dimensions],
+            metrics=[Metric(name=m) for m in selected_metrics],
         )
         response = service.run_report(request)
 
@@ -335,22 +499,15 @@ class ReportTable(APITable):
                 [m.value for m in row.metric_values]
             )
 
-        return pd.DataFrame(rows, columns=self.get_columns())
+        return pd.DataFrame(rows, columns=selected_dimensions + selected_metrics)
 
     def get_columns(self) -> List[str]:
         """
-        Gets all columns to be returned in pandas DataFrame responses
+        Gets all columns to be returned in pandas DataFrame responses.
+        The agent uses this schema to know which columns exist and select only what it needs.
+        Max 10 dimensions and 10 metrics can be requested per API call.
 
         Returns:
         List[str]: List of columns
         """
-        return [
-            'date',
-            'pagePath',
-            'sessionSource',
-            'sessions',
-            'activeUsers',
-            'screenPageViews',
-            'bounceRate',
-            'averageSessionDuration',
-        ]
+        return ALL_DIMENSIONS + ALL_METRICS
