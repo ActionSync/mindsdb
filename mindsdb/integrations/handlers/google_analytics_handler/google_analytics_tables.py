@@ -9,6 +9,23 @@ from mindsdb_sql_parser import ast
 from mindsdb.integrations.libs.api_handler import APITable
 from mindsdb.integrations.utilities.sql_utils import extract_comparison_conditions
 
+
+def get_all_identifiers(node) -> List[str]:
+    """Recursively extract all identifier names from an AST node or list of nodes."""
+    ids = []
+    if isinstance(node, ast.Identifier):
+        ids.append(node.parts[-1])
+    elif isinstance(node, (ast.Function, ast.BinaryOperation, ast.UnaryOperation)):
+        if hasattr(node, 'args') and node.args:
+            for arg in node.args:
+                ids.extend(get_all_identifiers(arg))
+    elif isinstance(node, ast.TypeCast):
+        ids.extend(get_all_identifiers(node.arg))
+    elif isinstance(node, list):
+        for item in node:
+            ids.extend(get_all_identifiers(item))
+    return ids
+
 # All standard dimensions from GA4 Data API Core Reporting schema
 # https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
 ALL_DIMENSIONS = [
@@ -169,10 +186,7 @@ class ConversionEventsTable(APITable):
             if isinstance(target, ast.Star):
                 selected_columns = self.get_columns()
                 break
-            elif isinstance(target, ast.Identifier):
-                selected_columns.append(target.parts[-1])
-            else:
-                raise ValueError(f"Unknown query target {type(target)}")
+            selected_columns.extend(get_all_identifiers(target))
 
         if len(events) == 0:
             events = pd.DataFrame([], columns=selected_columns)
@@ -467,8 +481,7 @@ class ReportTable(APITable):
             if isinstance(target, ast.Star):
                 is_star = True
                 break
-            elif isinstance(target, ast.Identifier):
-                requested_columns.append(target.parts[-1])
+            requested_columns.extend(get_all_identifiers(target))
 
         if is_star:
             selected_dimensions = DEFAULT_DIMENSIONS
