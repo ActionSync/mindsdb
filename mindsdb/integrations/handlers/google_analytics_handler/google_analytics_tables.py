@@ -1,13 +1,18 @@
 import pandas as pd
-from typing import List
+from typing import List, Optional
 
 from google.analytics.admin_v1beta import ListConversionEventsRequest, ConversionEvent, CreateConversionEventRequest, \
     UpdateConversionEventRequest, DeleteConversionEventRequest
-from google.analytics.data_v1beta.types import RunReportRequest, Dimension, Metric, DateRange
+from google.analytics.data_v1beta.types import (
+    RunReportRequest, Dimension, Metric, DateRange,
+    FilterExpression, FilterExpressionList, Filter,
+)
 from mindsdb_sql_parser import Constant
 from mindsdb_sql_parser import ast
 from mindsdb.integrations.libs.api_handler import APITable
 from mindsdb.integrations.utilities.sql_utils import extract_comparison_conditions
+from mindsdb.utilities import log
+logger = log.getLogger(__name__)
 
 
 def get_all_identifiers(node) -> List[str]:
@@ -137,13 +142,65 @@ ALL_METRICS = [
     'totalAdRevenue',
 ]
 
-# Default fallback for SELECT * — most commonly asked metrics, capped at 10 each
-DEFAULT_DIMENSIONS = ['date', 'pagePath', 'sessionSource', 'country', 'deviceCategory']
-DEFAULT_METRICS = [
-    'sessions', 'activeUsers', 'newUsers', 'screenPageViews',
-    'bounceRate', 'averageSessionDuration', 'engagementRate', 'totalRevenue',
-    'conversions', 'eventCount',
-]
+_OP_MAP = {
+    '=':    lambda col, val: col == val,
+    '!=':   lambda col, val: col != val,
+    '>':    lambda col, val: col > val,
+    '<':    lambda col, val: col < val,
+    '>=':   lambda col, val: col >= val,
+    '<=':   lambda col, val: col <= val,
+    'LIKE': lambda col, val: col.str.contains(val.replace('%', ''), na=False, case=False),
+}
+
+def _build_server_side_dimension_filter(
+    dimension_filters: list,
+) -> Optional[FilterExpression]:
+    """
+    Convert a list of (op, column, value) triples into a GA4 FilterExpression
+    that is pushed to the API, reducing data transfer and honouring row limits.
+
+    Only exact-match (=) and LIKE/contains patterns are translated server-side.
+    Inequality operators (!=, >, <, >=, <=) fall back to post-fetch filtering
+    because GA4 DimensionFilter does not support numeric range on string fields.
+
+    Returns None if no server-side-translatable filters exist.
+    """
+    if not dimension_filters:
+        return None
+
+    clauses: List[FilterExpression] = []
+    for op, col, val in dimension_filters:
+        if op == '=':
+            clauses.append(FilterExpression(
+                filter=Filter(
+                    field_name=col,
+                    string_filter=Filter.StringFilter(
+                        value=val,
+                        match_type=Filter.StringFilter.MatchType.EXACT,
+                        case_sensitive=False,
+                    ),
+                )
+            ))
+        elif op == 'LIKE':
+            pattern = val.replace('%', '').replace('_', '')
+            clauses.append(FilterExpression(
+                filter=Filter(
+                    field_name=col,
+                    string_filter=Filter.StringFilter(
+                        value=pattern,
+                        match_type=Filter.StringFilter.MatchType.CONTAINS,
+                        case_sensitive=False,
+                    ),
+                )
+            ))
+
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    return FilterExpression(
+        and_group=FilterExpressionList(expressions=clauses)
+    )
 
 
 class ConversionEventsTable(APITable):
@@ -398,10 +455,11 @@ class ConversionEventsTable(APITable):
         Returns:
             Concatenated DataFrame
         """
-        return pd.concat(
-            [existing_df, pd.DataFrame(data, columns=self.get_columns())],
-            ignore_index=True
-        )
+        new_df = pd.DataFrame(data, columns=self.get_columns())
+        frames = [f for f in [existing_df, new_df] if not f.empty]
+        if not frames:
+            return pd.DataFrame(columns=self.get_columns())
+        return pd.concat(frames, ignore_index=True)
 
     def get_columns(self) -> List[str]:
         """
@@ -426,30 +484,16 @@ class ReportTable(APITable):
         """
         Runs a report against the GA4 Data API.
 
-        The agent should SELECT only the specific columns it needs. The API supports
-        a maximum of 10 dimensions and 10 metrics per request. Selecting specific
-        columns ensures the API call stays within this limit.
+        Execution flow:
+        1. Schema probe (LIMIT 0): return empty DataFrame with ALL column names
+           so MindsDB learns the full schema without a GA API call.
+        2. Real query: parse requested columns from SELECT, WHERE, GROUP BY,
+           HAVING — make one GA API call with precisely those columns.
 
-        Available dimensions:
-            date, pagePath, sessionSource, sessionMedium, sessionCampaignName,
-            country, city, deviceCategory, operatingSystem, browser, language,
-            eventName, pageTitle
-
-        Available metrics:
-            sessions, activeUsers, newUsers, totalUsers, screenPageViews,
-            bounceRate, averageSessionDuration, engagementRate, engagedSessions,
-            eventCount, conversions, totalRevenue, ecommercePurchases,
-            addToCarts, checkouts, sessionConversionRate, userEngagementDuration,
-            scrolledUsers
-
-        Supported WHERE conditions:
-            - start_date: Accepts GA4 relative values ('NdaysAgo', 'yesterday', 'today')
-              or absolute dates in 'YYYY-MM-DD' format. Default: '30daysAgo'.
-            - end_date: Same format as start_date. Default: 'today'.
-
-        Example queries:
-            SELECT date, sessions, activeUsers FROM report WHERE start_date = '7daysAgo'
-            SELECT country, sessions, totalRevenue FROM report WHERE start_date = '2024-01-01' AND end_date = '2024-03-31'
+        NOTE: MindsDB's APIHandler.query() base class unconditionally replaces
+        query.targets with [Star()] before calling select().  We recover the
+        intended columns from the WHERE clause (dimension keys + date params)
+        and fall back to a sensible default when none can be inferred.
 
         Args:
             query (ast.Select): SQL query to parse.
@@ -457,70 +501,171 @@ class ReportTable(APITable):
         Returns:
             pd.DataFrame
         """
-        conditions = extract_comparison_conditions(query.where)
-        params = {
-            'start_date': '30daysAgo',
-            'end_date': 'today',
-        }
+        logger.debug(
+            "GA select() called | targets=%s | where=%s | group_by=%s | having=%s | limit=%s",
+            query.targets, query.where, query.group_by, query.having, query.limit,
+        )
+
+        is_limit_zero = query.limit is not None and query.limit.value == 0
+        is_empty_targets = not query.targets
+
+        targets_are_star = bool(query.targets) and all(
+            isinstance(t, ast.Star) for t in query.targets
+        )
+
+        conditions = []
+        if query.where is not None:
+            try:
+                conditions = extract_comparison_conditions(query.where)
+            except NotImplementedError:
+                logger.warning("GA select(): could not fully parse WHERE clause — proceeding with partial conditions")
+
+        has_date_filter = any(
+            arg1 in ('start_date', 'end_date') for _, arg1, _ in conditions
+        )
+
+        if is_limit_zero or is_empty_targets or (targets_are_star and not has_date_filter):
+            logger.debug("GA select(): schema probe detected — returning empty schema DataFrame")
+            return pd.DataFrame(columns=ALL_DIMENSIONS + ALL_METRICS)
+
+        params = {'start_date': '30daysAgo', 'end_date': 'today'}
+        dimension_filters: list = []  # (op, column, value)
+
         for op, arg1, arg2 in conditions:
             if arg1 in ('start_date', 'end_date'):
-                params[arg1] = arg2
-            else:
-                raise NotImplementedError
+                params[arg1] = str(arg2)
+            elif arg1 in ALL_DIMENSIONS:
+                dimension_filters.append((op, arg1, str(arg2)))
 
-        if query.order_by is not None:
-            pass
+        logger.debug("GA select(): date_range=%s  dimension_filters=%s", params, dimension_filters)
 
-        if query.limit is not None:
-            pass
+        if query.having is not None:
+            try:
+                having_conditions = extract_comparison_conditions(query.having)
+                for op, arg1, arg2 in having_conditions:
+                    if arg1 in ALL_DIMENSIONS:
+                        dimension_filters.append((op, arg1, str(arg2)))
+            except NotImplementedError:
+                pass
 
-        # Determine which columns the agent selected
-        requested_columns = []
-        is_star = False
-        for target in query.targets:
-            if isinstance(target, ast.Star):
-                is_star = True
-                break
-            requested_columns.extend(get_all_identifiers(target))
+        requested_columns: list = []
 
-        if is_star:
-            selected_dimensions = DEFAULT_DIMENSIONS
-            selected_metrics = DEFAULT_METRICS
-        else:
-            selected_dimensions = [c for c in requested_columns if c in ALL_DIMENSIONS]
-            selected_metrics = [c for c in requested_columns if c in ALL_METRICS]
+        if not targets_are_star:
+            for target in query.targets:
+                requested_columns.extend(get_all_identifiers(target))
 
-            if not selected_dimensions:
-                selected_dimensions = ['date']
+        if query.group_by:
+            for group_col in query.group_by:
+                for col in get_all_identifiers(group_col):
+                    if col not in requested_columns:
+                        requested_columns.append(col)
 
-            selected_dimensions = selected_dimensions[:10]
-            selected_metrics = selected_metrics[:10]
+        # Always include dimension-filter columns so we can apply post-filtering
+        for _, col, _ in dimension_filters:
+            if col not in requested_columns:
+                requested_columns.append(col)
 
-        service = self.handler.connect_data_api()
-        request = RunReportRequest(
-            property=f"properties/{self.handler.property_id}",
-            date_ranges=[DateRange(start_date=params['start_date'], end_date=params['end_date'])],
-            dimensions=[Dimension(name=d) for d in selected_dimensions],
-            metrics=[Metric(name=m) for m in selected_metrics],
-        )
-        response = service.run_report(request)
+        logger.debug("GA select(): requested_columns before classification=%s", requested_columns)
 
-        rows = []
-        for row in response.rows:
-            rows.append(
-                [d.value for d in row.dimension_values] +
-                [m.value for m in row.metric_values]
+        selected_dimensions = [c for c in requested_columns if c in ALL_DIMENSIONS]
+        selected_metrics    = [c for c in requested_columns if c in ALL_METRICS]
+
+        
+        if not selected_metrics:
+            raise ValueError(
+                f"No valid GA4 metrics found in query. "
+                f"Columns seen: {requested_columns}. "
+                f"Check ALL_METRICS for valid metric names."
+            )
+        # Only raise for missing dimensions if the query also has no metrics to return
+        if not selected_dimensions:
+            logger.debug(
+                "GA select(): no dimensions requested — running aggregate (dimension-less) query"
             )
 
-        return pd.DataFrame(rows, columns=selected_dimensions + selected_metrics)
+        logger.debug("GA select(): dimensions=%s  metrics=%s", selected_dimensions, selected_metrics)
+
+        if len(selected_dimensions) > 10:
+            raise ValueError(
+                f"Too many dimensions requested ({len(selected_dimensions)}). "
+                f"GA4 API allows max 10 per query."
+            )
+
+        row_limit = 10_000
+        if query.limit is not None and query.limit.value > 0:
+            row_limit = int(query.limit.value)
+        logger.debug("GA select(): row_limit=%s", row_limit)
+        server_filter = _build_server_side_dimension_filter(dimension_filters)
+        logger.debug("GA select(): server_side_filter=%s", server_filter)
+        service    = self.handler.connect_data_api()
+        date_range = DateRange(start_date=params['start_date'], end_date=params['end_date'])
+
+        def run_ga_request(dimensions, metrics):
+            """Make one GA4 RunReport call and return a DataFrame."""
+            req = RunReportRequest(
+                property=f"properties/{self.handler.property_id}",
+                date_ranges=[date_range],
+                dimensions=[Dimension(name=d) for d in dimensions],
+                metrics=[Metric(name=m) for m in metrics],
+                limit=row_limit,
+                dimension_filter=server_filter,
+            )
+            logger.debug(
+                "GA RunReportRequest | property=%s | dates=%s→%s | dims=%s | metrics=%s | limit=%s",
+                self.handler.property_id,
+                params['start_date'], params['end_date'],
+                dimensions, metrics, row_limit,
+            )
+            resp = service.run_report(req)
+            logger.debug(
+                "GA RunReport response | row_count=%s | rows_returned=%s",
+                resp.row_count, len(resp.rows),
+            )
+            rows = [
+                [d.value for d in row.dimension_values] +
+                [m.value for m in row.metric_values]
+                for row in resp.rows
+            ]
+            return pd.DataFrame(rows, columns=dimensions + metrics)
+
+        # Split metrics into batches of ≤10 (GA4 API limit), merge results
+        metric_batches = [
+            selected_metrics[i:i + 10]
+            for i in range(0, max(len(selected_metrics), 1), 10)
+        ]
+        df = run_ga_request(selected_dimensions, metric_batches[0])
+        for batch in metric_batches[1:]:
+            df_batch = run_ga_request(selected_dimensions, batch)
+            if selected_dimensions:
+                df = pd.merge(df, df_batch, on=selected_dimensions, how='inner')
+            else:
+                df = pd.concat([df, df_batch], axis=1)
+
+        # ── Apply post-fetch dimension filters ────────────────────────────────
+        for op, col, val in dimension_filters:
+            if col not in df.columns:
+                logger.warning(
+                    "GA select(): dimension filter column '%s' not in result — skipping post-filter", col
+                )
+                continue
+            filter_fn = _OP_MAP.get(op)
+            if not filter_fn:
+                logger.warning("GA select(): unsupported filter operator '%s' — skipping", op)
+                continue
+            df = df[filter_fn(df[col], val)]
+
+        logger.debug("GA select(): returning %d rows with columns %s", len(df), list(df.columns))
+        return df
+
+    def list(self, *args, **kwargs) -> pd.DataFrame:
+        raise NotImplementedError(
+            "ReportTable does not support list(); use select() directly."
+        )
 
     def get_columns(self) -> List[str]:
         """
-        Gets all columns to be returned in pandas DataFrame responses.
-        The agent uses this schema to know which columns exist and select only what it needs.
-        Max 10 dimensions and 10 metrics can be requested per API call.
-
-        Returns:
-        List[str]: List of columns
+        Full schema exposed to MindsDB for agent/catalog discovery.
+        Max 10 dimensions + 10 metrics can be requested per GA API call,
+        but all valid names are listed here for the agent to reference.
         """
         return ALL_DIMENSIONS + ALL_METRICS
