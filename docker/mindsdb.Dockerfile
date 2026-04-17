@@ -83,6 +83,12 @@ COPY . .
 # Install the "mindsdb" package now that we have the code for it
 RUN --mount=type=cache,target=/root/.cache uv pip install --no-deps "."
 
+# Install Google Analytics client and the mindsdb google_analytics extra
+# These packages are required when using the google_analytics integration handler
+RUN --mount=type=cache,target=/root/.cache \
+    uv pip install google-analytics-data \
+    && uv pip install 'mindsdb[google_analytics]'
+
 COPY docker/mindsdb_config.release.json /root/mindsdb_config.json
 
 ENV PYTHONUNBUFFERED=1
